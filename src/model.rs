@@ -1,12 +1,14 @@
 
 use std::f32::consts::PI;
 
-use itertools::Itertools;
-
 use miniquad::date;
 
 use macroquad::prelude::*;
 use macroquad::rand::RandGenerator;
+
+const MIN_N_NODES: usize = 30;
+
+const MAX_N_NODES: usize = 1000;
 
 struct Node {
     x: f32,
@@ -38,11 +40,10 @@ impl Model {
         let screen_height = screen_height();
 
         // Initialize nodes.
-        let num_nodes = 100;
-        let mut nodes = Vec::with_capacity(num_nodes);
+        let mut nodes = Vec::with_capacity(MIN_N_NODES);
 
-        for i in 0..num_nodes {
-            let k = (i as f32) / (num_nodes as f32);
+        for i in 0..MIN_N_NODES {
+            let k = (i as f32) / (MIN_N_NODES as f32);
             let theta = PI * 2.0 * k;
 
             let x = screen_width / 2.0 + theta.cos() * 100.0;
@@ -64,11 +65,11 @@ impl Model {
         }
 
         // Initialize edges.
-        let mut edges = Vec::with_capacity(num_nodes);
+        let mut edges = Vec::with_capacity(MIN_N_NODES);
 
-        for i in 0..num_nodes {
+        for i in 0..MIN_N_NODES {
             let node_index1 = i;
-            let node_index2 = (i + 1) % num_nodes;
+            let node_index2 = (i + 1) % MIN_N_NODES;
 
             let length = 20.0;
 
@@ -171,35 +172,95 @@ impl Model {
         self.edges.push(edge3);
     }
 
-    fn calculate_node_velocities(&mut self) {
-        for (node_index1, node_index2) in (0..self.nodes.len()).tuple_combinations() {
-            let [node1, node2] = self.nodes.get_disjoint_mut([node_index1, node_index2]).expect(
-                "node_index1 should not equal to node_index2"
-            );
-
-            let diff_x = node1.x - node2.x;
-            let diff_y = node1.y - node2.y;
-            let distance = (diff_x * diff_x + diff_y * diff_y).sqrt();
-
-            if distance > 100.0 {
-                continue;
-            } else if distance == 0.0 {
-                continue;
-            }
-
-            let force = 1.0 * (distance / 10.0).powf(-2.0);
-            let fx = force * diff_x / distance;
-            let fy = force * diff_y / distance;
-
-            node1.dx += fx;
-            node1.dy += fy;
-
-            node2.dx -= fx;
-            node2.dy -= fy;
+    fn apply_damper_forces(&mut self, dt: f32) {
+        for node in &mut self.nodes {
+            let k = 0.1_f32.powf(dt);
+            node.dx *= k;
+            node.dy *= k;
         }
     }
 
-    fn calculate_edge_velocities(&mut self) {
+    fn apply_repulsive_forces(&mut self, dt: f32) {
+        for edge in &self.edges {
+            let node_index1 = edge.node_index1;
+            let node_index2 = edge.node_index2;
+
+            for node_index3 in 0..self.nodes.len() {
+                if node_index1 != node_index3 && node_index2 != node_index3 {
+                    // Fetch the nodes.
+                    let [node1, node2, node3] = self.nodes.get_disjoint_mut(
+                        [node_index1, node_index2, node_index3]
+                    ).unwrap();
+
+                    // Calculate repulsive force.
+                    let ax = node3.x - node1.x;
+                    let ay = node3.y - node1.y;
+
+                    let bx = node3.x - node2.x;
+                    let by = node3.y - node2.y;
+
+                    let cx = node2.x - node1.x;
+                    let cy = node2.y - node1.y;
+
+                    let a = (ax * ax + ay * ay).sqrt();
+                    let b = (bx * bx + by * by).sqrt();
+                    let c = (cx * cx + cy * cy).sqrt();
+
+                    let k = ax * cx + ay * cy;
+
+                    let d;
+
+                    let theta = self.rand_generator.gen_range(0.0, 2.0 * PI);
+                    let mut vx = theta.cos();
+                    let mut vy = theta.sin();
+
+                    if k <= 0.0 {
+
+                        d = a;
+
+                        if a > 0.0 {
+                            vx = ax / a;
+                            vy = ay / a;
+                        }
+
+                    } else if k < 1.0 {
+
+                        d = (ax * cy - ay * cx) / (a * c);
+
+                        let ex = node1.y - node2.y;
+                        let ey = node2.x - node1.x;
+                        let e = (ex * ex + ey * ey).sqrt();
+
+                        if e > 0.0 {
+                            vx = ex / e;
+                            vy = ey / e;
+                        }
+
+                    } else {
+
+                        d = b;
+
+                        if b > 0.0 {
+                            vx = bx / b;
+                            vy = by / b;
+                        }
+
+                    }
+
+                    let f = (d.max(1e-10) / 100.0).powi(-2).min(20.0);
+
+                    let fx = vx * f;
+                    let fy = vy * f;
+
+                    node3.dx += fx * dt;
+                    node3.dy += fy * dt;
+
+                }
+            }
+        }
+    }
+
+    fn apply_elastic_forces(&mut self, dt: f32) {
         for edge in &self.edges {
             let node_index1 = edge.node_index1;
             let node_index2 = edge.node_index2;
@@ -216,15 +277,15 @@ impl Model {
                 continue;
             }
 
-            let force = (distance - edge.length) * 5.0;
+            let force = (distance - edge.length) * 50.0;
             let fx = force * diff_x / distance;
             let fy = force * diff_y / distance;
 
-            node1.dx += fx;
-            node1.dy += fy;
+            node1.dx += fx * dt;
+            node1.dy += fy * dt;
 
-            node2.dx -= fx;
-            node2.dy -= fy;
+            node2.dx -= fx * dt;
+            node2.dy -= fy * dt;
         }
     }
 
@@ -281,21 +342,24 @@ impl Model {
     pub fn update(&mut self) {
         // Calcuate time.
         let t = get_time();
-        let dt = get_frame_time();
+        let dt = get_frame_time().min(1.0);
 
         // Process mouse.
         self.process_mouse();
 
         // Span nodes.
-        while (self.edges.len() - 100) <= (t / 0.1) as usize {
+        while self.nodes.len() < MAX_N_NODES && (self.nodes.len() - MIN_N_NODES) <= (t / 0.1) as usize {
             self.swapn_node();
         }
 
-        // Update node velocities.
-        self.calculate_node_velocities();
+        // Apply damper forces.
+        self.apply_damper_forces(dt);
 
-        // Calculate edge velocities.
-        self.calculate_edge_velocities();
+        // Apply repulsive forces.
+        self.apply_repulsive_forces(dt);
+
+        // Apply elastic forces.
+        self.apply_elastic_forces(dt);
 
         // Update node positions.
         self.update_node_positions(dt);
